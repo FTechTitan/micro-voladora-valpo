@@ -1,5 +1,5 @@
 {
   "game_name": "Micro Voladora Valpo",
-  "description": "Maneja una micro de Valparaíso con física de verdad: suspensión, vuelcos y 20 pasajeros que rebotan adentro y salen volando si aterrizas chueco. Llega de la Aduana al Sector 5 de Reñaca antes que te pillen los pacos. Si llegas, fuegos artificiales en la bahía.",
-  "player_mode": "single_player"
+  "description": "Maneja una micro de Valparaíso con física de verdad: suspensión, vuelcos y 20 pasajeros que rebotan adentro y salen volando si aterrizas chueco. Llega de la Aduana al Sector 5 de Reñaca antes que te pillen los pacos. De a dos, carrera a pantalla partida: gana el que recauda más, llegando primero y con más pasajeros vivos.",
+  "player_mode": "two_player"
 }

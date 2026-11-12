@@ -1,13 +1,15 @@
 // Micro Voladora Valpo — versión LATERAL con física real (Matter.js, incluido en Phaser)
-// La micro es un chasis con dos ruedas con suspensión y 20 pasajeros que son cuerpos físicos:
-// si aterrizas chueco, se dan vuelta, rebotan y salen volando por la escotilla y las ventanas.
+// 1 o 2 jugadores: cada micro es un chasis con dos ruedas con suspensión y 20 pasajeros que son
+// cuerpos físicos. En 2 jugadores la pantalla se parte: P1 arriba, P2 abajo, carrera a Reñaca.
 
 const W = 800;
 const H = 600;
 const TL = 2600; // largo de cada tramo en píxeles
 const END = 7 * TL; // la meta: Sector 5 de Reñaca
 const BASE = 430; // altura base del suelo
+const HORY = 330; // altura del horizonte en el mundo
 const M = Phaser.Physics.Matter.Matter;
+const CAT = [1, 2, 4]; // categorías de colisión: suelo, jugador 1, jugador 2
 
 // DO NOT replace existing keys — they match the physical arcade cabinet wiring.
 // To add local testing shortcuts, append extra keys to any array.
@@ -64,8 +66,6 @@ const T = [
   ['REÑACA · SECTOR 5', 0x070b1e, 0x1a2648, 0x0c2238, 1],
 ];
 const trOf = (x) => Math.max(0, Math.min(6, Math.floor(x / TL)));
-let seed = 7;
-const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
 const hash = (k) => {
   const v = Math.sin(k * 12.9898) * 43758.5453;
   return v - Math.floor(v);
@@ -98,47 +98,45 @@ new Phaser.Game({
   scene: { create, update },
 });
 
-function create() {
+function create(data) {
   const sc = this;
   createControls(sc);
   makeTextures(sc);
+  sc.np = (data && data.np) | 0; // 0 = portada, 1 o 2 jugadores
   sc.now = 0;
-  sc.over = 0;
-  sc.win = 0;
-  sc.cash = 0;
-  sc.tr = -1;
-  sc.gnd = 0;
-  sc.sea = 0;
-  sc.paco = { x: -700 };
-  sc.t0 = sc.lostN = sc.flipT = sc.jumpT = sc.sirT = sc.fwT = sc.thudT = 0;
-  sc.inside = 20;
-  sc.fw = [];
-  sc.parts = [];
-  sc.sky = { a: T[0][1], b: T[0][2], m: T[0][3], n: 0 };
-  sc.bg = sc.add.graphics().setScrollFactor(0).setDepth(-10);
+  sc.ended = 0;
+  sc.wobj = []; // objetos del mundo (los ignoran las cámaras del tablero)
+  sc.wadd = (o) => (sc.wobj.push(o), o);
   buildWorld(sc);
-  buildBus(sc, 240, gy(240) - 90);
-  sc.cameras.main.startFollow(sc.bus, true, 0.12, 0.12).setFollowOffset(-180, 80);
-  createHud(sc);
+  const n = Math.max(1, sc.np);
+  sc.P = [];
+  for (let k = 0; k < n; k++) sc.P.push(makePlayer(sc, k, 240, gy(240) - 90));
+  setupCameras(sc);
+  sc.ov = sc.add.container(0, 0).setScrollFactor(0).setDepth(30); // capa de portada y resultados
+  for (const c of sc.cams) c.ignore(sc.ov);
+  if (!sc.np) title(sc);
   // choques: suelo (para saber si hay ruedas apoyadas), mar y golpes fuertes
+  const who = (l) => sc.P[+l.slice(-1) - 1];
   sc.matter.world.on('collisionactive', (ev) => {
     for (const pr of ev.pairs) {
-      const l = pr.bodyA.label + pr.bodyB.label;
-      if (l.includes('wheel') && l.includes('ground')) sc.gnd = sc.now;
+      for (const b of [pr.bodyA, pr.bodyB]) if (b.label.startsWith('wheel') && (pr.bodyA.label === 'ground' || pr.bodyB.label === 'ground')) who(b.label).gnd = sc.now;
     }
   });
   sc.matter.world.on('collisionstart', (ev) => {
     for (const pr of ev.pairs) {
       const a = pr.bodyA;
       const b = pr.bodyB;
-      const l = a.label + b.label;
-      if (l.includes('sea') && (l.includes('bus') || l.includes('wheel')) && !sc.sea) toSea(sc);
-      if (l.includes('ground') && (l.includes('bus') || l.includes('wheel'))) {
-        const v = Math.abs((a.label === 'ground' ? b : a).velocity.y);
-        if (v > 9 && sc.now > (sc.thudT || 0)) {
-          sc.thudT = sc.now + 300;
+      const o = a.label === 'ground' || a.label === 'sea' ? b : a;
+      const g = o === a ? b : a;
+      if (!(o.label.startsWith('bus') || o.label.startsWith('wheel'))) continue;
+      const P = who(o.label);
+      if (g.label === 'sea' && !P.sea) toSea(sc, P);
+      if (g.label === 'ground') {
+        const v = Math.abs(o.velocity.y);
+        if (v > 9 && sc.now > P.thudT) {
+          P.thudT = sc.now + 300;
           sfx(sc, 'thud');
-          sc.cameras.main.shake(200, Math.min(0.02, v * 0.0012));
+          P.cam.shake(200, Math.min(0.02, v * 0.0012));
         }
       }
     }
@@ -151,39 +149,47 @@ function update(time, delta) {
   sc.now = time;
   const pr = sc.controls.pressed;
   const hd = sc.controls.held;
-  const B = sc.B;
-  if (sc.over || sc.win) {
-    if (time > (sc.over || sc.win) + 1500 && (pr.START1 || pr.P1_1)) sc.scene.restart();
-  } else {
-    drive(sc, hd, pr, dt);
-    updatePax(sc, dt);
-    updatePacos(sc, dt);
-    const tr = trOf(B.position.x);
-    if (tr !== sc.tr) {
-      sc.tr = tr;
-      if (tr > 0) {
-        sfx(sc, 'bell');
-        say(sc, '▶ ' + T[tr][0], '#6fc2d0');
-        sc.cash += 500;
-      }
-    }
-    if (B.position.x > END) winGame(sc, time);
-    if (B.position.y > 1500) toSea(sc); // se cayó a un hoyo: lo tratamos como al mar
+  if (!sc.np) {
+    if (pr.START1 || pr.P1_1) sc.scene.restart({ np: 1 });
+    if (pr.START2 || pr.P2_1) sc.scene.restart({ np: 2 });
+  } else if (sc.ended) {
+    if (time > sc.ended + 1500 && (pr.START1 || pr.START2 || pr.P1_1 || pr.P2_1)) sc.scene.restart({ np: 0 });
   }
-  sc.bus.setPosition(B.position.x, B.position.y).setRotation(B.angle);
-  updateSky(sc, dt, time);
-  drawBg(sc);
-  updateParts(sc, dt);
-  refreshHud(sc);
+  for (const P of sc.P) {
+    if (sc.np && !P.done && !sc.ended) {
+      drive(sc, P, hd, pr, dt);
+      updatePax(sc, P, dt);
+      updatePacos(sc, P, dt);
+      const tr = trOf(P.B.position.x);
+      if (tr !== P.tr) {
+        P.tr = tr;
+        if (tr > 0) {
+          sfx(sc, 'bell');
+          say(sc, P, '▶ ' + T[tr][0], '#6fc2d0');
+          P.cash += 500;
+        }
+      }
+      if (P.B.position.x > END) finish(sc, P, 1);
+      if (P.B.position.y > 1500) toSea(sc, P); // se cayó a un hoyo: lo tratamos como al mar
+    }
+    P.bus.setPosition(P.B.position.x, P.B.position.y).setRotation(P.B.angle);
+    updateSky(sc, P, dt, time);
+    drawBg(sc, P);
+    refreshHud(sc, P);
+  }
+  if (sc.np && !sc.ended) checkEnd(sc, time);
   engine(sc);
   for (const k in pr) pr[k] = false;
 }
 
-// ---------- La micro ----------
-function buildBus(sc, x, y) {
+// ---------- Jugadores y cámaras ----------
+function makePlayer(sc, k, x, y) {
+  const P = { k, key: 'P' + (k + 1) + '_', B: null, wheels: [], pax: [], paco: { x: -700 }, inside: 20, t0: 0, lostN: 0, flipT: 0, jumpT: 0, sirT: 0, fwT: 0, thudT: 0, gnd: 0, sea: 0, done: 0, win: 0, cash: 0, tr: -1, fw: [], sky: { a: T[0][1], b: T[0][2], m: T[0][3], n: 0 } };
   const Bd = M.Body;
   const Bo = sc.matter.bodies;
-  const o = { friction: 0.4, density: 0.0025, label: 'bus' };
+  const cf = { category: CAT[k + 1], mask: CAT[0] | CAT[k + 1] };
+  const lab = (s) => s + (k + 1);
+  const o = { friction: 0.4, density: 0.0025, label: lab('bus'), collisionFilter: cf };
   // chasis: piso, paredes delantera y trasera y techo con una escotilla al medio
   const parts = [
     Bo.rectangle(0, 20, 150, 10, o),
@@ -191,42 +197,74 @@ function buildBus(sc, x, y) {
     Bo.rectangle(72, -4, 10, 56, o),
     Bo.rectangle(-48, -30, 52, 6, o),
     Bo.rectangle(48, -30, 52, 6, o),
-    Bo.rectangle(0, 0, 150, 60, { ...o, isSensor: true, label: 'cabin' }),
   ];
-  const body = Bd.create({ parts, friction: 0.4, restitution: 0.1, label: 'bus' });
+  const body = Bd.create({ parts, friction: 0.4, restitution: 0.1, label: lab('bus'), collisionFilter: cf });
   Bd.setPosition(body, { x, y });
   sc.matter.world.add(body);
+  P.B = body;
   // la imagen se sincroniza a mano con el cuerpo (el compuesto descoloca el origen automático)
-  const bus = sc.add.image(x, y, 'bus').setDepth(3);
-  sc.B = body;
-  sc.bus = bus;
-  sc.cabin = parts[5];
-  sc.wheels = [-50, 50].map((ox) => {
-    const w = sc.matter.add.image(x + ox, y + 34, 'wheel', null, { shape: { type: 'circle', radius: 20 }, friction: 1.1, density: 0.004, restitution: 0.05, label: 'wheel' });
-    w.setDepth(4);
+  P.bus = sc.wadd(sc.add.image(x, y, 'bus' + k).setDepth(3));
+  P.wheels = [-50, 50].map((ox) => {
+    const w = sc.matter.add.image(x + ox, y + 34, 'wheel', null, { shape: { type: 'circle', radius: 20 }, friction: 1.1, density: 0.004, restitution: 0.05, label: lab('wheel'), collisionFilter: cf });
+    sc.wadd(w.setDepth(4));
     // suspensión: dos resortes en triángulo por rueda, para que la rueda suba y baje sin pendulear
     sc.matter.add.constraint(body, w.body, 34, 0.2, { pointA: { x: ox, y: 0 }, damping: 0.12 });
     sc.matter.add.constraint(body, w.body, 52, 0.2, { pointA: { x: ox - Math.sign(ox) * 40, y: 0 }, damping: 0.12 });
     return w;
   });
   // pasajeros: 20 cuerpos chicos adentro
-  sc.pax = [];
-  for (let k = 0; k < 20; k++) {
-    const p = sc.matter.add.image(x - 55 + (k % 10) * 12, y - 10 - Math.floor(k / 10) * 14, 'pax' + (k % 3), null, { shape: { type: 'circle', radius: 6 }, density: 0.0006, friction: 0.2, frictionAir: 0.01, restitution: 0.35, label: 'pax' });
-    p.setDepth(2);
+  for (let j = 0; j < 20; j++) {
+    const p = sc.matter.add.image(x - 55 + (j % 10) * 12, y - 6 - Math.floor(j / 10) * 13, 'pax' + (j % 3), null, { shape: { type: 'circle', radius: 6 }, density: 0.0006, friction: 0.2, frictionAir: 0.01, restitution: 0.35, label: lab('pax'), collisionFilter: cf });
+    sc.wadd(p.setDepth(2));
     p.out = 0;
     p.lost = 0;
-    sc.pax.push(p);
+    P.pax.push(p);
   }
+  P.pacoCar = sc.wadd(sc.add.image(-700, 0, 'paco').setDepth(3).setVisible(false));
+  P.bg = sc.wadd(sc.add.graphics().setDepth(-10));
+  return P;
 }
 
-function drive(sc, hd, pr, dt) {
+// 1 jugador: una cámara a pantalla completa. 2 jugadores: mitad arriba y mitad abajo.
+// Cada jugador tiene una cámara del mundo y una del tablero (sin zoom); una más dibuja la portada.
+function setupCameras(sc) {
+  const n = sc.P.length;
+  const hh = n > 1 ? H / 2 : H;
+  const zoom = n > 1 ? 0.72 : 1;
+  sc.cams = [];
+  sc.P.forEach((P, k) => {
+    const y0 = k * hh;
+    P.cam = k ? sc.cameras.add(0, y0, W, hh) : sc.cameras.main.setViewport(0, y0, W, hh);
+    P.cam.setZoom(zoom).startFollow(P.bus, true, 0.12, 0.12).setFollowOffset(n > 1 ? -140 : -180, n > 1 ? 40 : 80);
+    P.hud = sc.add.container(0, 0).setScrollFactor(0).setDepth(20);
+    P.hudH = hh;
+    P.hcam = sc.cameras.add(0, y0, W, hh);
+    createHud(sc, P);
+    sc.cams.push(P.cam, P.hcam);
+  });
+  sc.ucam = sc.cameras.add(0, 0, W, H);
+  sc.cams.push(sc.ucam);
+  for (const P of sc.P) {
+    for (const Q of sc.P) {
+      if (Q !== P) (P.cam.ignore(Q.bg), P.cam.ignore(Q.hud));
+      P.hcam.ignore(Q.bg);
+      if (Q !== P) P.hcam.ignore(Q.hud);
+    }
+    P.cam.ignore(P.hud);
+    P.hcam.ignore(sc.wobj);
+    sc.ucam.ignore(P.hud);
+  }
+  sc.ucam.ignore(sc.wobj);
+}
+
+function drive(sc, P, hd, pr, dt) {
   const Bd = M.Body;
-  const B = sc.B;
-  const grounded = sc.now - sc.gnd < 80;
-  const gas = hd.P1_R || hd.P1_U;
-  const brake = hd.P1_L || hd.P1_D;
-  for (const w of sc.wheels) {
+  const B = P.B;
+  const K = P.key;
+  const grounded = sc.now - P.gnd < 80;
+  const gas = hd[K + 'R'] || hd[K + 'U'];
+  const brake = hd[K + 'L'] || hd[K + 'D'];
+  for (const w of P.wheels) {
     const av = w.body.angularVelocity;
     if (gas) Bd.setAngularVelocity(w.body, Math.min(av + 0.1, 1.1));
     else if (brake) Bd.setAngularVelocity(w.body, Math.max(av - 0.06, -0.3));
@@ -241,41 +279,40 @@ function drive(sc, hd, pr, dt) {
     if (brake) Bd.setAngularVelocity(B, B.angularVelocity + 0.0035);
   }
   // B1: brinco, solo con las ruedas apoyadas
-  if (pr.P1_1 && grounded && sc.now > (sc.jumpT || 0)) {
-    sc.jumpT = sc.now + 900;
+  if (pr[K + '1'] && grounded && sc.now > P.jumpT) {
+    P.jumpT = sc.now + 900;
     Bd.applyForce(B, B.position, { x: 0.02, y: -0.26 });
     sfx(sc, 'whoosh');
   }
-  if (pr.P1_2) {
+  if (pr[K + '2']) {
     sfx(sc, 'horn');
-    say(sc, '¡PIIIII!', '#f2efe6');
+    say(sc, P, '¡PIIIII!', '#f2efe6');
   }
-  if (sc.sea > 0) {
-    sc.sea -= dt;
-    if (sc.sea <= 0) respawn(sc, SEA1 + 160, true);
+  if (P.sea > 0) {
+    P.sea -= dt;
+    if (P.sea <= 0) respawn(sc, P, SEA1 + 160, true);
   }
   // de cabeza más de 2 s: la enderezan los pasajeros, pero se arrancan dos
   const up = Math.abs(((B.angle % (Math.PI * 2)) + Math.PI * 3) % (Math.PI * 2) - Math.PI) < 0.9;
   if (up && Math.abs(B.velocity.x) < 2) {
-    sc.flipT = (sc.flipT || 0) + dt;
-    if (sc.flipT > 2) {
-      sc.flipT = 0;
-      respawn(sc, B.position.x + 30, false);
+    P.flipT += dt;
+    if (P.flipT > 2) {
+      P.flipT = 0;
+      respawn(sc, P, B.position.x + 30, false);
       let n = 0;
-      for (const p of sc.pax) if (!p.lost && n < 2) (p.lost = 1, p.destroy(), n++);
-      sc.lostN = (sc.lostN || 0) + n;
-      say(sc, '¡SE DIO VUELTA! LA ENDEREZARON  -' + n, '#ff7b5c');
+      for (const p of P.pax) if (!p.lost && n < 2) (p.lost = 1, p.destroy(), n++);
+      P.lostN += n;
+      say(sc, P, '¡SE DIO VUELTA! LA ENDEREZARON  -' + n, '#ff7b5c');
       sfx(sc, 'crash');
     }
-  } else sc.flipT = 0;
-  sc.speed = B.velocity.x;
+  } else P.flipT = 0;
 }
 
 // un pasajero está adentro si su centro cae dentro de la cabina
-function updatePax(sc, dt) {
-  const B = sc.B;
+function updatePax(sc, P, dt) {
+  const B = P.B;
   let inside = 0;
-  for (const p of sc.pax) {
+  for (const p of P.pax) {
     if (p.lost) continue;
     const dx = p.x - B.position.x;
     const dy = p.y - B.position.y;
@@ -291,79 +328,78 @@ function updatePax(sc, dt) {
       if (p.out > 1.3 || p.y > B.position.y + 500) {
         p.lost = 1;
         p.setTint(0x888888);
-        sc.lostN = (sc.lostN || 0) + 1;
+        P.lostN++;
         sfx(sc, 'scream');
-        say(sc, ['¡SE CAYÓ UNO!', '¡CHAO, CABALLERO!', '¡SE FUE VOLANDO!', '¡AY, MI ABUELITA!'][sc.lostN % 4], '#ff7b5c');
+        say(sc, P, ['¡SE CAYÓ UNO!', '¡CHAO, CABALLERO!', '¡SE FUE VOLANDO!', '¡AY, MI ABUELITA!'][P.lostN % 4], '#ff7b5c');
         sc.time.delayedCall(4000, () => p.destroy());
       }
     }
   }
-  sc.inside = inside;
-  if (inside === 0 && !sc.over && !sc.win) gameOver(sc, sc.now, 1);
+  P.inside = inside;
+  if (inside === 0) finish(sc, P, 0, 1);
 }
 
-function updatePacos(sc, dt) {
-  const B = sc.B;
-  if (!sc.t0) {
+function updatePacos(sc, P, dt) {
+  const B = P.B;
+  if (!P.t0) {
     if (B.velocity.x < 3) return;
-    sc.t0 = sc.now;
-    say(sc, '¡LOS PACOS TE VIERON VOLAR!', '#ff5e5b');
+    P.t0 = sc.now;
+    say(sc, P, '¡LOS PACOS TE VIERON VOLAR!', '#ff5e5b');
   }
-  const pv = 230 + sc.tr * 22 + (sc.now - sc.t0) * 0.004;
-  sc.paco.x += pv * dt;
-  const d = B.position.x - sc.paco.x;
-  if (d > 1600) sc.paco.x = B.position.x - 1600;
-  if (d < 900 && sc.now > (sc.sirT || 0)) {
-    sc.sirT = sc.now + 450;
+  const pv = 230 + P.tr * 22 + (sc.now - P.t0) * 0.004;
+  P.paco.x += pv * dt;
+  const d = B.position.x - P.paco.x;
+  if (d > 1600) P.paco.x = B.position.x - 1600;
+  if (d < 900 && sc.now > P.sirT) {
+    P.sirT = sc.now + 450;
     sc.sirH = !sc.sirH;
     sfx(sc, sc.sirH ? 'sirA' : 'sirB');
   }
-  if (d <= 90) gameOver(sc, sc.now, 0);
-  sc.pacoCar.setPosition(sc.paco.x, gy(sc.paco.x) - 26).setVisible(sc.t0 > 0);
+  if (d <= 90) finish(sc, P, 0, 0);
+  P.pacoCar.setPosition(P.paco.x, gy(P.paco.x) - 26).setVisible(P.t0 > 0);
 }
 
-function toSea(sc) {
-  if (sc.sea > 0) return;
-  sc.sea = 1.5;
+function toSea(sc, P) {
+  if (P.sea > 0) return;
+  P.sea = 1.5;
   sfx(sc, 'splash');
-  sc.cameras.main.shake(400, 0.02);
-  sc.cameras.main.flash(300, 30, 95, 140);
-  say(sc, '¡AL MAR!', '#6fc2d0');
-  sc.paco.x -= 300;
+  P.cam.shake(400, 0.02);
+  P.cam.flash(300, 30, 95, 140);
+  say(sc, P, '¡AL MAR!', '#6fc2d0');
+  P.paco.x -= 300;
 }
 
-function respawn(sc, x, drown) {
+function respawn(sc, P, x, drown) {
   const Bd = M.Body;
   const y = gy(x) - 90;
-  Bd.setPosition(sc.B, { x, y });
-  Bd.setVelocity(sc.B, { x: 2, y: 0 });
-  Bd.setAngle(sc.B, 0);
-  Bd.setAngularVelocity(sc.B, 0);
-  sc.wheels.forEach((w, k) => {
+  Bd.setPosition(P.B, { x, y });
+  Bd.setVelocity(P.B, { x: 2, y: 0 });
+  Bd.setAngle(P.B, 0);
+  Bd.setAngularVelocity(P.B, 0);
+  P.wheels.forEach((w, k) => {
     Bd.setPosition(w.body, { x: x + (k ? 50 : -50), y: y + 34 });
     Bd.setVelocity(w.body, { x: 2, y: 0 });
   });
   let k = 0;
-  for (const p of sc.pax) {
+  for (const p of P.pax) {
     if (p.lost) continue;
     if (drown && k++ % 2) {
       p.lost = 1;
-      sc.lostN = (sc.lostN || 0) + 1;
+      P.lostN++;
       p.destroy();
     } else {
       Bd.setPosition(p.body, { x: x - 55 + (k % 10) * 12, y: y - 10 });
       Bd.setVelocity(p.body, { x: 2, y: 0 });
     }
   }
-  if (drown) say(sc, 'SE AHOGARON LA MITAD', '#ff7b5c');
+  if (drown) say(sc, P, 'SE AHOGARON LA MITAD', '#ff7b5c');
 }
 
 // ---------- Mundo: suelo, casas, lugares ----------
 function buildWorld(sc) {
-  const g = sc.add.graphics().setDepth(-3); // suelo
-  const hg = sc.add.graphics().setDepth(-6); // casas
-  const lg = sc.add.graphics().setDepth(-4); // lugares
-  sc.lg = lg;
+  const g = sc.wadd(sc.add.graphics().setDepth(-3)); // suelo
+  const hg = sc.wadd(sc.add.graphics().setDepth(-6)); // casas
+  const lg = sc.wadd(sc.add.graphics().setDepth(-4)); // lugares
   const STEP = 36;
   // cuerpos del suelo: cadena de rectángulos inclinados
   let pts = [];
@@ -422,8 +458,6 @@ function buildWorld(sc) {
   lg.fillStyle(0xf2efe6).fillRect(mx - 8, gy(mx) - 220, 12, 220).fillRect(mx + 120, gy(mx) - 220, 12, 220);
   lg.fillStyle(0xffd23f).fillRect(mx - 20, gy(mx) - 250, 160, 44);
   for (let k = 0; k < 7; k++) lg.fillStyle(k % 2 ? 0x1b2733 : 0xd62828).fillRect(mx - 12 + k * 20, gy(mx) - 244, 12, 32);
-  // paraderos de cartel (decorativos por ahora)
-  sc.pacoCar = sc.add.image(-700, 0, 'paco').setDepth(3).setVisible(false);
 }
 
 // Cada lugar, dibujado con pocas formas, apoyado en el suelo en x
@@ -520,28 +554,28 @@ function drawLand(g, id, x) {
   }
 }
 
-// ---------- Fondo: cielo, bahía, cerros del frente ----------
-function updateSky(sc, dt, t) {
-  const tr = T[trOf(sc.B.position.x)];
+// ---------- Fondo por jugador: cielo, bahía, cerros del frente, fuegos ----------
+function updateSky(sc, P, dt, t) {
+  const tr = T[trOf(P.B.position.x)];
   const f = Math.min(1, dt * 0.7);
-  const k = sc.sky;
+  const k = P.sky;
   k.a = mix(k.a, tr[1], f);
   k.b = mix(k.b, tr[2], f);
   k.m = mix(k.m, tr[3], f);
   k.n += (tr[4] - k.n) * f;
-  const fire = sc.win ? 220 : trOf(sc.B.position.x) === 6 ? 900 : 0;
-  if (fire && t > (sc.fwT || 0)) {
-    sc.fwT = t + fire;
-    sc.fw.push({ x: 80 + Math.random() * (W - 160), y: 300, vy: -(320 + Math.random() * 200), ty: 40 + Math.random() * 130, c: [0xff3b3b, 0xffd23f, 0x7cfc00, 0xffffff, 0xc86bff, 0x3ad0ff][Math.floor(Math.random() * 6)], sp: null });
+  const fire = P.win ? 220 : trOf(P.B.position.x) === 6 ? 900 : 0;
+  if (fire && t > P.fwT) {
+    P.fwT = t + fire;
+    P.fw.push({ x: 0.1 + Math.random() * 0.8, y: 0.5, vy: -(0.55 + Math.random() * 0.3), ty: 0.07 + Math.random() * 0.22, c: [0xff3b3b, 0xffd23f, 0x7cfc00, 0xffffff, 0xc86bff, 0x3ad0ff][Math.floor(Math.random() * 6)], sp: null });
   }
-  sc.fw = sc.fw.filter((r) => {
+  P.fw = P.fw.filter((r) => {
     if (!r.sp) {
       r.y += r.vy * dt;
       if (r.y < r.ty) {
         r.sp = [];
         for (let j = 0; j < 22; j++) {
           const an = (j / 22) * Math.PI * 2;
-          const sp = 90 + Math.random() * 90;
+          const sp = 0.15 + Math.random() * 0.15;
           r.sp.push({ x: r.x, y: r.y, vx: Math.cos(an) * sp, vy: Math.sin(an) * sp, l: 1 });
         }
         if (Math.random() < 0.5) sfx(sc, 'boom');
@@ -551,7 +585,7 @@ function updateSky(sc, dt, t) {
     let alive = false;
     for (const s of r.sp) {
       s.l -= dt * 0.8;
-      s.vy += 60 * dt;
+      s.vy += 0.1 * dt;
       s.x += s.vx * dt;
       s.y += s.vy * dt;
       if (s.l > 0) alive = true;
@@ -560,32 +594,37 @@ function updateSky(sc, dt, t) {
   });
 }
 
-function drawBg(sc) {
-  const g = sc.bg;
-  const sky = sc.sky;
-  const bx = sc.cameras.main.scrollX;
-  const cy = 300;
+// se dibuja en coordenadas del mundo sobre lo que ve la cámara del jugador
+function drawBg(sc, P) {
+  const g = P.bg;
+  const sky = P.sky;
+  const v = P.cam.worldView;
+  const x0 = v.x - 40;
+  const x1 = v.right + 40;
+  const y0 = v.y - 40;
+  const y1 = v.bottom + 40;
+  const cy = HORY;
   g.clear();
-  g.fillGradientStyle(sky.a, sky.a, sky.b, sky.b).fillRect(0, 0, W, cy);
-  g.fillStyle(sky.m).fillRect(0, cy, W, H - cy);
-  if (sky.n > 0.5) for (let k = 0; k < 40; k++) g.fillStyle(0xffffff, (sky.n - 0.5) * 2 * hash(k * 3.1)).fillRect(((hash(k) * 1400 - bx * 0.02) % 1400 + 1400) % 1400 - 300, hash(k + 50) * (cy - 60), 2, 2);
+  g.fillGradientStyle(sky.a, sky.a, sky.b, sky.b).fillRect(x0, y0, x1 - x0, Math.max(0, cy - y0));
+  g.fillStyle(sky.m).fillRect(x0, cy, x1 - x0, Math.max(0, y1 - cy));
+  if (sky.n > 0.5) for (let k = 0; k < 40; k++) g.fillStyle(0xffffff, (sky.n - 0.5) * 2 * hash(k * 3.1)).fillRect(x0 + ((hash(k) * 1400 - v.x * 0.02) % 1400 + 1400) % 1400 - 300, y0 + hash(k + 50) * (cy - y0 - 60), 2, 2);
   // barcos
   for (let k = 0; k < 5; k++) {
-    const x = ((k * 230 - bx * 0.08) % 1150 + 1150) % 1150 - 175;
+    const x = x0 + ((k * 230 - v.x * 0.08) % 1150 + 1150) % 1150 - 175;
     g.fillStyle(0x3b3f45).fillRect(x, cy + 6, 46, 7);
     g.fillStyle(sky.n > 0.5 ? 0xffd27a : k % 2 ? 0xc8553d : 0x3a8fb7).fillRect(x + 6, cy + 1, 26, 5);
   }
-  // cerros del frente con casitas (lucecitas de noche)
+  // cerros del frente con casitas (lucecitas de noche), con parallax
   const hy = (x) => cy + 10 - Math.max(0, 62 * Math.sin(x / 190) + 38 * Math.sin(x / 71) + 28);
-  const px = bx * 0.15;
+  const px = -v.x * 0.85;
   g.fillStyle(mix(0x7d7a6e, 0x0a0f1c, sky.n));
   g.beginPath();
-  g.moveTo(-10, cy + 12);
-  for (let x = -10; x <= W + 10; x += 12) g.lineTo(x, hy(x + px));
-  g.lineTo(W + 10, cy + 12);
+  g.moveTo(x0, cy + 12);
+  for (let x = x0; x <= x1; x += 12) g.lineTo(x, hy(x + px));
+  g.lineTo(x1, cy + 12);
   g.closePath();
   g.fillPath();
-  for (let x = -10; x <= W + 10; x += 7) {
+  for (let x = x0; x <= x1; x += 7) {
     const q = Math.floor((x + px) / 7);
     const top = hy(q * 7);
     for (let j = 0; j < 4; j++) {
@@ -594,77 +633,111 @@ function drawBg(sc) {
       if (y < cy + 6 && hash(q + j * 31.7) < 0.75) g.fillStyle(sky.n > 0.5 ? 0xffd27a : HC[Math.floor(hh * 1000) % 12]).fillRect(q * 7 - px, y, sky.n > 0.5 ? 2 : 5, sky.n > 0.5 ? 2 : 4);
     }
   }
-  // el mar de abajo, hasta el borde de la pantalla
-  g.fillStyle(sky.m, 0.5).fillRect(0, cy + 14, W, H);
-  for (const r of sc.fw) {
+  g.fillStyle(sky.m, 0.5).fillRect(x0, cy + 14, x1 - x0, Math.max(0, y1 - cy - 14));
+  // fuegos artificiales, en fracciones de lo que ve la cámara
+  const fx = (r) => v.x + r * v.width;
+  const fy = (r) => v.y + r * v.height;
+  for (const r of P.fw) {
     if (!r.sp) {
-      g.fillStyle(0xfff2b0).fillRect(r.x - 1.5, r.y, 3, 10);
+      g.fillStyle(0xfff2b0).fillRect(fx(r.x) - 1.5, fy(r.y), 3, 10);
       continue;
     }
-    for (const s of r.sp) if (s.l > 0) g.fillStyle(r.c, s.l).fillCircle(s.x, s.y, 2.6);
+    for (const s of r.sp) if (s.l > 0) g.fillStyle(r.c, s.l).fillCircle(fx(s.x), fy(s.y), 2.6);
   }
 }
 
-// ---------- Fin de partida ----------
+// ---------- Portada, fin de partida y resultados ----------
 const ST = (sz, c) => ({ fontFamily: 'monospace', fontSize: sz, fontStyle: 'bold', color: c, stroke: '#1b2733', strokeThickness: 7, align: 'center' });
 const mmss = (ms) => Math.floor(ms / 60000) + ':' + ('0' + Math.floor((ms % 60000) / 1000)).slice(-2);
+const money = (n) => '$ ' + n.toLocaleString('es-CL');
 
-function gameOver(sc, t, why) {
-  if (sc.over) return;
-  sc.over = t;
-  sfx(sc, 'crash');
-  const ui = (o) => o.setScrollFactor(0).setDepth(20);
-  ui(sc.add.rectangle(W / 2, H / 2, W, H, 0x10141a, 0.78));
-  ui(sc.add.text(W / 2, 150, why ? '¡TE QUEDASTE\nSIN PASAJEROS!' : '¡TE PILLARON\nLOS PACOS!', ST('44px', '#ff5e5b')).setOrigin(0.5));
-  const hito = sc.tr > 0 ? T[sc.tr - 1][0] : 'LA ADUANA';
-  ui(sc.add.text(W / 2, 300, (why ? 'Nadie te paga: te echaron\nde la empresa.\n' : '') + 'Llegaste hasta ' + hito + '\nRecaudaste $ ' + sc.cash.toLocaleString('es-CL'), ST('22px', '#ffd23f')).setOrigin(0.5));
-  const pr = ui(sc.add.text(W / 2, 440, 'START o B1\npara otro turno', ST('20px', '#9bc53d')).setOrigin(0.5));
+function title(sc) {
+  const ov = sc.ov;
+  ov.add(sc.add.rectangle(W / 2, H / 2, W, H, 0x10141a, 0.55));
+  ov.add(sc.add.text(W / 2, 110, 'MICRO VOLADORA\nVALPO', ST('56px', '#ffd23f')).setOrigin(0.5));
+  ov.add(sc.add.text(W / 2, 235, 'De la Aduana a Reñaca antes que te pillen los pacos.\nSi se da vuelta, los pasajeros se van.', ST('18px', '#f2efe6')).setOrigin(0.5));
+  ov.add(sc.add.text(W / 2, 330, '► o ▲ ACELERA   ◄ o ▼ FRENA\nEN EL AIRE: ▲ LEVANTA LA NARIZ, ▼ LA BAJA\nB1 BRINCO   B2 BOCINA', ST('16px', '#9aa3ad')).setOrigin(0.5));
+  const p1 = ov.add(sc.add.text(W / 2 - 190, 470, 'START 1\n1 JUGADOR', ST('26px', '#9bc53d')).setOrigin(0.5));
+  const p2 = ov.add(sc.add.text(W / 2 + 190, 470, 'START 2\n2 JUGADORES\ncarrera a Reñaca', ST('26px', '#6fc2d0')).setOrigin(0.5));
+  sc.tweens.add({ targets: [p1, p2], alpha: 0.35, duration: 600, yoyo: true, repeat: -1 });
+}
+
+// why: 0 pacos, 1 sin pasajeros; win: llegó a Reñaca
+function finish(sc, P, win, why) {
+  if (P.done) return;
+  P.done = sc.now;
+  P.win = win;
+  if (win) {
+    // propina por pasajero vivo y bono por llegar: el primero gana el doble
+    const first = !sc.P.some((Q) => Q !== P && Q.win);
+    P.tip = P.inside * 1000;
+    P.bono = first ? 10000 : 5000;
+    P.cash += P.tip + P.bono;
+    sfx(sc, 'bell');
+    for (let k = 0; k < 6; k++) sc.time.delayedCall(600 + k * 500, () => sfx(sc, k % 2 ? 'sirA' : 'sirB'));
+    say(sc, P, '¡LLEGASTE A REÑACA! +' + money(P.tip + P.bono), '#ffd23f');
+    if (first && sc.P.length > 1) {
+      sc.closeT = sc.now + 15000;
+      for (const Q of sc.P) if (Q !== P && !Q.done) say(sc, Q, '¡LLEGÓ EL OTRO! TIENES 15 s', '#ff5e5b');
+    }
+  } else {
+    P.why = why;
+    sfx(sc, 'crash');
+    say(sc, P, why ? '¡SIN PASAJEROS!' : '¡TE PILLARON LOS PACOS!', '#ff5e5b');
+  }
+}
+
+function checkEnd(sc, t) {
+  const Ps = sc.P;
+  const n = Ps.length;
+  const allDone = Ps.every((P) => P.done);
+  const someWin = Ps.some((P) => P.win);
+  // en carrera, cuando llega el primero el otro tiene 15 s; después se comparan las platas
+  if (!(allDone || (n > 1 && someWin && t > sc.closeT))) return;
+  for (const P of Ps) if (!P.done) finish(sc, P, 0, 2);
+  sc.ended = t;
+  const ov = sc.ov;
+  ov.add(sc.add.rectangle(W / 2, H / 2, W, H, 0x10141a, 0.78));
+  const line = (P) => (P.win ? 'Llegó a Reñaca en ' + mmss(P.done - P.t0) + ' con ' + P.inside + ' pasajeros\npropina ' + money(P.tip) + ' + bono ' + money(P.bono) : (P.why === 2 ? 'No alcanzó a llegar' : P.why ? 'Se quedó sin pasajeros' : 'Lo pillaron los pacos') + ' en ' + T[Math.max(0, P.tr)][0] + '\n' + P.inside + ' pasajeros vivos') + '\nRECAUDÓ ' + money(P.cash);
+  if (n === 1) {
+    const P = Ps[0];
+    ov.add(sc.add.text(W / 2, 150, P.win ? '¡LLEGASTE A REÑACA!\n¡FELIZ AÑO NUEVO!' : P.why ? '¡TE QUEDASTE\nSIN PASAJEROS!' : '¡TE PILLARON\nLOS PACOS!', ST('44px', P.win ? '#ffd23f' : '#ff5e5b')).setOrigin(0.5));
+    ov.add(sc.add.text(W / 2, 300, line(P), ST('20px', '#f2efe6')).setOrigin(0.5));
+  } else {
+    // gana el que recaudó más: llegar primero y traer pasajeros vivos es lo que paga
+    const w = Ps[0].cash === Ps[1].cash ? null : Ps[0].cash > Ps[1].cash ? Ps[0] : Ps[1];
+    ov.add(sc.add.text(W / 2, 100, w ? '¡GANA EL JUGADOR ' + (w.k + 1) + '!' : '¡EMPATE!', ST('48px', w && w.k ? '#6fc2d0' : '#ffd23f')).setOrigin(0.5));
+    Ps.forEach((P, k) => ov.add(sc.add.text(W / 2, 215 + k * 135, 'JUGADOR ' + (k + 1) + '\n' + line(P), ST('17px', k ? '#6fc2d0' : '#9bc53d')).setOrigin(0.5)));
+  }
+  const pr = ov.add(sc.add.text(W / 2, 500, 'START para otro turno', ST('20px', '#9bc53d')).setOrigin(0.5));
   sc.tweens.add({ targets: pr, alpha: 0.2, duration: 500, yoyo: true, repeat: -1 });
 }
 
-function winGame(sc, t) {
-  if (sc.win) return;
-  sc.win = t;
-  const tip = sc.inside * 1000;
-  sc.cash += tip;
-  sfx(sc, 'bell');
-  for (let k = 0; k < 6; k++) sc.time.delayedCall(600 + k * 500, () => sfx(sc, k % 2 ? 'sirA' : 'sirB'));
-  const ui = (o) => o.setScrollFactor(0).setDepth(20);
-  ui(sc.add.text(W / 2, 120, '¡LLEGASTE A REÑACA!\n¡FELIZ AÑO NUEVO!', ST('42px', '#ffd23f')).setOrigin(0.5));
-  ui(sc.add.text(W / 2, 265, 'Tiempo ' + mmss(t - sc.t0) + '\n' + sc.inside + ' pasajeros llegaron vivos: propina $' + tip.toLocaleString('es-CL') + '\n\nRECAUDASTE  $ ' + sc.cash.toLocaleString('es-CL'), ST('21px', '#f2efe6')).setOrigin(0.5));
-  const pr = ui(sc.add.text(W / 2, 400, 'START o B1 para otro turno', ST('18px', '#9bc53d')).setOrigin(0.5));
-  sc.tweens.add({ targets: pr, alpha: 0.2, duration: 500, yoyo: true, repeat: -1 });
+function say(sc, P, txt, col) {
+  const y = P.hudH * 0.42;
+  const t = sc.add.text(W / 2, y + 40, txt, { fontFamily: 'monospace', fontSize: P.hudH < H ? '22px' : '26px', fontStyle: 'bold', color: col, stroke: '#1b2733', strokeThickness: 6, align: 'center' }).setOrigin(0.5);
+  P.hud.add(t);
+  sc.tweens.add({ targets: t, y: y - 10, alpha: 0, delay: 600, duration: 1100, onComplete: () => t.destroy() });
 }
 
-function say(sc, txt, col) {
-  const t = sc.add.text(W / 2, 205, txt, { fontFamily: 'monospace', fontSize: '26px', fontStyle: 'bold', color: col, stroke: '#1b2733', strokeThickness: 6, align: 'center' }).setOrigin(0.5).setScrollFactor(0).setDepth(12);
-  sc.tweens.add({ targets: t, y: 150, alpha: 0, delay: 600, duration: 1100, onComplete: () => t.destroy() });
-}
-
-function updateParts(sc, dt) {
-  sc.parts = sc.parts.filter((o) => {
-    o.life -= dt;
-    if (o.life > 0) return true;
-    o.s.destroy();
-    return false;
-  });
-}
-
-// ---------- Texturas: la micro, las ruedas, los pasajeros, el radiopatrulla ----------
+// ---------- Texturas: las micros, las ruedas, los pasajeros, el radiopatrulla ----------
 function makeTextures(sc) {
   const g = sc.make.graphics({ add: false });
   // micro de 150x64, centro en (75,32): blanca con franjas, ventanas transparentes y escotilla
-  g.fillStyle(0xf2efe6).fillRoundedRect(0, 4, 150, 56, 8);
-  g.fillStyle(0xc8553d).fillRect(0, 40, 150, 8);
-  g.fillStyle(0x2f7f9e).fillRect(0, 48, 150, 4);
-  g.fillStyle(0x1f2b36, 0.35);
-  for (let k = 0; k < 4; k++) g.fillRect(14 + k * 30, 12, 22, 20);
-  g.fillStyle(0x1f2b36, 0.5).fillRect(128, 10, 18, 26); // parabrisas
-  g.fillStyle(0x111111).fillRect(0, 0, 150, 5);
-  g.fillStyle(0xffb000).fillRect(60, 1, 30, 3);
-  g.fillStyle(0xd62828).fillRect(0, 22, 5, 14);
-  g.fillStyle(0xffd23f).fillRect(145, 22, 5, 14);
-  g.generateTexture('bus', 150, 64);
+  [[0xc8553d, 0x2f7f9e], [0xe8c547, 0x1b4aa0]].forEach((cs, k) => {
+    g.clear();
+    g.fillStyle(0xf2efe6).fillRoundedRect(0, 4, 150, 56, 8);
+    g.fillStyle(cs[0]).fillRect(0, 40, 150, 8);
+    g.fillStyle(cs[1]).fillRect(0, 48, 150, 4);
+    g.fillStyle(0x1f2b36, 0.35);
+    for (let j = 0; j < 4; j++) g.fillRect(14 + j * 30, 12, 22, 20);
+    g.fillStyle(0x1f2b36, 0.5).fillRect(128, 10, 18, 26); // parabrisas
+    g.fillStyle(0x111111).fillRect(0, 0, 150, 5);
+    g.fillStyle(0xffb000).fillRect(60, 1, 30, 3);
+    g.fillStyle(0xd62828).fillRect(0, 22, 5, 14);
+    g.fillStyle(0xffd23f).fillRect(145, 22, 5, 14);
+    g.generateTexture('bus' + k, 150, 64);
+  });
   g.clear();
   g.fillStyle(0x111111).fillCircle(20, 20, 20);
   g.fillStyle(0x8a8a8a).fillCircle(20, 20, 9);
@@ -687,40 +760,43 @@ function makeTextures(sc) {
   g.destroy();
 }
 
-// ---------- HUD ----------
-function createHud(sc) {
+// ---------- Tablero por jugador (en su propia cámara, sin zoom) ----------
+function createHud(sc, P) {
   const st = (sz, col) => ({ fontFamily: 'monospace', fontSize: sz, fontStyle: 'bold', color: col });
-  const ui = (o) => o.setScrollFactor(0).setDepth(10);
-  const tb = ui(sc.add.graphics());
-  tb.fillStyle(0x1b2733, 0.92).fillRoundedRect(20, 16, 190, 44, 10).fillRoundedRect(W - 210, 16, 190, 44, 10);
-  sc.tTop = ui(sc.add.text(115, 38, '', st('18px', '#f2efe6')).setOrigin(0.5));
-  sc.tCash = ui(sc.add.text(W - 115, 38, '', st('20px', '#ffd23f')).setOrigin(0.5));
-  sc.tPaco = ui(sc.add.text(W / 2, 30, '', st('13px', '#ff5e5b')).setOrigin(0.5));
-  sc.tTramo = ui(sc.add.text(W / 2, 92, '', st('13px', '#6fc2d0')).setOrigin(0.5));
-  sc.tSpeed = ui(sc.add.text(W - 20, H - 16, '', st('22px', '#f2efe6')).setOrigin(1, 1));
-  sc.prog = ui(sc.add.graphics());
-  const hint = ui(sc.add.text(W / 2, 250, '► o ▲ ACELERA   ◄ o ▼ FRENA\nEN EL AIRE: ▲ LEVANTA LA NARIZ, ▼ LA BAJA\nB1 BRINCO   B2 BOCINA\n\nLLEGA A REÑACA ANTES QUE TE PILLEN LOS PACOS.\nSI SE DA VUELTA, LOS PASAJEROS SE VAN.', { ...st('15px', '#f2efe6'), stroke: '#1b2733', strokeThickness: 5, align: 'center' }).setOrigin(0.5).setDepth(12));
-  sc.tweens.add({ targets: hint, alpha: 0, delay: 8000, duration: 800 });
+  const hud = P.hud;
+  const add = (o) => (hud.add(o), o);
+  const col = P.k ? '#6fc2d0' : '#9bc53d';
+  const tb = add(sc.add.graphics());
+  tb.fillStyle(0x1b2733, 0.92).fillRoundedRect(20, 14, 190, 40, 10).fillRoundedRect(W - 210, 14, 190, 40, 10);
+  if (sc.np > 1) add(sc.add.text(W / 2, 14, 'JUGADOR ' + (P.k + 1), st('13px', col)).setOrigin(0.5, 0));
+  P.tTop = add(sc.add.text(115, 34, '', st('17px', '#f2efe6')).setOrigin(0.5));
+  P.tCash = add(sc.add.text(W - 115, 34, '', st('19px', '#ffd23f')).setOrigin(0.5));
+  P.tPaco = add(sc.add.text(W / 2, 34, '', st('13px', '#ff5e5b')).setOrigin(0.5));
+  P.tTramo = add(sc.add.text(W / 2, 84, '', st('12px', '#6fc2d0')).setOrigin(0.5));
+  P.tSpeed = add(sc.add.text(W - 20, P.hudH - 12, '', st('20px', '#f2efe6')).setOrigin(1, 1));
+  P.prog = add(sc.add.graphics());
 }
 
-function refreshHud(sc) {
-  const B = sc.B;
-  sc.tTop.setText('PASAJEROS ' + (sc.inside || 0)).setColor((sc.inside || 0) <= 4 ? '#ff5e5b' : '#f2efe6');
-  sc.tCash.setText('$ ' + sc.cash.toLocaleString('es-CL'));
-  const d = B.position.x - sc.paco.x;
-  sc.tPaco.setText(sc.win || !sc.t0 ? '' : 'PACOS A ' + Math.max(0, Math.round(d / 10)) + ' m').setColor(d < 500 ? '#ff5e5b' : '#f2efe6');
-  sc.tSpeed.setText(Math.round(Math.abs(B.velocity.x) * 6) + ' km/h');
-  const pg = sc.prog.clear();
+function refreshHud(sc, P) {
+  const B = P.B;
+  P.tTop.setText('PASAJEROS ' + P.inside).setColor(P.inside <= 4 ? '#ff5e5b' : '#f2efe6');
+  P.tCash.setText(money(P.cash));
+  const d = B.position.x - P.paco.x;
+  P.tPaco.setText(P.done || !P.t0 ? '' : 'PACOS A ' + Math.max(0, Math.round(d / 10)) + ' m').setColor(d < 500 ? '#ff5e5b' : '#f2efe6');
+  P.tSpeed.setText(Math.round(Math.abs(B.velocity.x) * 6) + ' km/h');
+  const pg = P.prog.clear();
   const x0 = 150;
   const x1 = W - 150;
   const zx = (x) => x0 + (x1 - x0) * Phaser.Math.Clamp(x / END, 0, 1);
-  pg.lineStyle(3, 0x1b2733).lineBetween(x0, 76, x1, 76);
-  pg.lineStyle(3, 0x6fc2d0).lineBetween(x0, 76, zx(B.position.x), 76);
-  pg.fillStyle(0xf2efe6).fillCircle(x0, 76, 5);
-  for (let k = 0; k < 7; k++) pg.fillStyle(B.position.x >= (k + 1) * TL ? 0x6fc2d0 : 0xf2efe6).fillCircle(zx((k + 1) * TL), 76, k === 6 ? 7 : 5);
-  pg.fillStyle(0xffd23f).fillRect(zx(B.position.x) - 7, 69, 14, 9);
-  sc.tTramo.setText(sc.win ? '' : '▶ ' + T[Math.max(0, sc.tr)][0] + '   ' + (sc.tr + 1) + '/7');
-  if (d < 400 && sc.t0 && !sc.over && !sc.win) pg.fillStyle(Math.floor(sc.now / 160) % 2 ? 0xff2d2d : 0x2d6bff, 0.12 * (1 - d / 400)).fillRect(0, 0, W, H);
+  pg.lineStyle(3, 0x1b2733).lineBetween(x0, 70, x1, 70);
+  pg.lineStyle(3, 0x6fc2d0).lineBetween(x0, 70, zx(B.position.x), 70);
+  pg.fillStyle(0xf2efe6).fillCircle(x0, 70, 5);
+  for (let k = 0; k < 7; k++) pg.fillStyle(B.position.x >= (k + 1) * TL ? 0x6fc2d0 : 0xf2efe6).fillCircle(zx((k + 1) * TL), 70, k === 6 ? 7 : 5);
+  pg.fillStyle(0xffd23f).fillRect(zx(B.position.x) - 7, 63, 14, 9);
+  // en carrera, el rival también va en la barra
+  for (const Q of sc.P) if (Q !== P) pg.fillStyle(0x6fc2d0, 0.8).fillRect(zx(Q.B.position.x) - 5, 64, 10, 7);
+  P.tTramo.setText(P.done || !sc.np ? '' : '▶ ' + T[Math.max(0, P.tr)][0] + '   ' + (P.tr + 1) + '/7');
+  if (d < 400 && P.t0 && !P.done) pg.fillStyle(Math.floor(sc.now / 160) % 2 ? 0xff2d2d : 0x2d6bff, 0.12 * (1 - d / 400)).fillRect(0, 0, W, P.hudH);
 }
 
 // ---------- Sonido ----------
@@ -743,9 +819,13 @@ function engine(sc) {
       gn.connect(ctx.destination);
       o.start();
       sc.eng = o;
-      sc.events.once('shutdown', () => o.stop());
+      sc.events.once('shutdown', () => {
+        o.stop();
+        sc.eng = null;
+      });
     }
-    const sp = Math.min(1, Math.abs(sc.wheels[0].body.angularVelocity) / 0.6);
+    let sp = 0;
+    for (const P of sc.P) sp = Math.max(sp, Math.min(1, Math.abs(P.wheels[0].body.angularVelocity) / 0.6));
     sc.eng.frequency.setTargetAtTime(45 + sp * 130, ctx.currentTime, 0.1);
   } catch (e) {
     // sin audio
