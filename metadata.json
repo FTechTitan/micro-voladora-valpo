@@ -1,5 +1,5 @@
 {
   "game_name": "Micro Voladora Valpo",
-  "description": "Dos micros bajan volando por los cerros de Valparaíso. Recoge pasajeros, esquiva perros y curaos, y aterriza derecho para no perder a nadie.",
-  "player_mode": "two_player"
+  "description": "Maneja una micro de Valparaíso desde el asiento del chofer: bajas los cerros volando, recoges pasajeros en el paradero, esquivas perros y curaos, y aterrizas derecho para no perder a nadie.",
+  "player_mode": "single_player"
 }
