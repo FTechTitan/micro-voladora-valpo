@@ -110,6 +110,8 @@ function create() {
   sc.gnd = 0;
   sc.sea = 0;
   sc.paco = { x: -700 };
+  sc.t0 = sc.lostN = sc.flipT = sc.jumpT = sc.sirT = sc.fwT = sc.thudT = 0;
+  sc.inside = 20;
   sc.fw = [];
   sc.parts = [];
   sc.sky = { a: T[0][1], b: T[0][2], m: T[0][3], n: 0 };
@@ -117,7 +119,8 @@ function create() {
   buildWorld(sc);
   buildBus(sc, 240, gy(240) - 90);
   sc.cameras.main.startFollow(sc.bus, true, 0.12, 0.12).setFollowOffset(-180, 80);
-  createHud(sc);  // choques: suelo (para saber si hay ruedas apoyadas), mar y golpes fuertes
+  createHud(sc);
+  // choques: suelo (para saber si hay ruedas apoyadas), mar y golpes fuertes
   sc.matter.world.on('collisionactive', (ev) => {
     for (const pr of ev.pairs) {
       const l = pr.bodyA.label + pr.bodyB.label;
@@ -148,7 +151,7 @@ function update(time, delta) {
   sc.now = time;
   const pr = sc.controls.pressed;
   const hd = sc.controls.held;
-  const B = sc.bus.body;
+  const B = sc.B;
   if (sc.over || sc.win) {
     if (time > (sc.over || sc.win) + 1500 && (pr.START1 || pr.P1_1)) sc.scene.restart();
   } else {
@@ -195,7 +198,7 @@ function buildBus(sc, x, y) {
   sc.matter.world.add(body);
   // la imagen se sincroniza a mano con el cuerpo (el compuesto descoloca el origen automático)
   const bus = sc.add.image(x, y, 'bus').setDepth(3);
-  bus.body = body;
+  sc.B = body;
   sc.bus = bus;
   sc.cabin = parts[5];
   sc.wheels = [-50, 50].map((ox) => {
@@ -219,7 +222,7 @@ function buildBus(sc, x, y) {
 
 function drive(sc, hd, pr, dt) {
   const Bd = M.Body;
-  const B = sc.bus.body;
+  const B = sc.B;
   const grounded = sc.now - sc.gnd < 80;
   const gas = hd.P1_R || hd.P1_U;
   const brake = hd.P1_L || hd.P1_D;
@@ -270,7 +273,7 @@ function drive(sc, hd, pr, dt) {
 
 // un pasajero está adentro si su centro cae dentro de la cabina
 function updatePax(sc, dt) {
-  const B = sc.bus.body;
+  const B = sc.B;
   let inside = 0;
   for (const p of sc.pax) {
     if (p.lost) continue;
@@ -300,7 +303,7 @@ function updatePax(sc, dt) {
 }
 
 function updatePacos(sc, dt) {
-  const B = sc.bus.body;
+  const B = sc.B;
   if (!sc.t0) {
     if (B.velocity.x < 3) return;
     sc.t0 = sc.now;
@@ -332,10 +335,10 @@ function toSea(sc) {
 function respawn(sc, x, drown) {
   const Bd = M.Body;
   const y = gy(x) - 90;
-  Bd.setPosition(sc.bus.body, { x, y });
-  Bd.setVelocity(sc.bus.body, { x: 2, y: 0 });
-  Bd.setAngle(sc.bus.body, 0);
-  Bd.setAngularVelocity(sc.bus.body, 0);
+  Bd.setPosition(sc.B, { x, y });
+  Bd.setVelocity(sc.B, { x: 2, y: 0 });
+  Bd.setAngle(sc.B, 0);
+  Bd.setAngularVelocity(sc.B, 0);
   sc.wheels.forEach((w, k) => {
     Bd.setPosition(w.body, { x: x + (k ? 50 : -50), y: y + 34 });
     Bd.setVelocity(w.body, { x: 2, y: 0 });
@@ -519,14 +522,14 @@ function drawLand(g, id, x) {
 
 // ---------- Fondo: cielo, bahía, cerros del frente ----------
 function updateSky(sc, dt, t) {
-  const tr = T[trOf(sc.bus.body.position.x)];
+  const tr = T[trOf(sc.B.position.x)];
   const f = Math.min(1, dt * 0.7);
   const k = sc.sky;
   k.a = mix(k.a, tr[1], f);
   k.b = mix(k.b, tr[2], f);
   k.m = mix(k.m, tr[3], f);
   k.n += (tr[4] - k.n) * f;
-  const fire = sc.win ? 220 : trOf(sc.bus.body.position.x) === 6 ? 900 : 0;
+  const fire = sc.win ? 220 : trOf(sc.B.position.x) === 6 ? 900 : 0;
   if (fire && t > (sc.fwT || 0)) {
     sc.fwT = t + fire;
     sc.fw.push({ x: 80 + Math.random() * (W - 160), y: 300, vy: -(320 + Math.random() * 200), ty: 40 + Math.random() * 130, c: [0xff3b3b, 0xffd23f, 0x7cfc00, 0xffffff, 0xc86bff, 0x3ad0ff][Math.floor(Math.random() * 6)], sp: null });
@@ -701,7 +704,7 @@ function createHud(sc) {
 }
 
 function refreshHud(sc) {
-  const B = sc.bus.body;
+  const B = sc.B;
   sc.tTop.setText('PASAJEROS ' + (sc.inside || 0)).setColor((sc.inside || 0) <= 4 ? '#ff5e5b' : '#f2efe6');
   sc.tCash.setText('$ ' + sc.cash.toLocaleString('es-CL'));
   const d = B.position.x - sc.paco.x;
