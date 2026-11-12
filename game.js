@@ -113,7 +113,7 @@ function create(data) {
   for (let k = 0; k < n; k++) sc.P.push(makePlayer(sc, k, 240, gy(240) - 90));
   setupCameras(sc);
   sc.ov = sc.add.container(0, 0).setScrollFactor(0).setDepth(30); // capa de portada y resultados
-  for (const c of sc.cams) c.ignore(sc.ov);
+  for (const c of sc.cams) if (c !== sc.ucam) c.ignore(sc.ov);
   if (!sc.np) title(sc);
   // choques: suelo (para saber si hay ruedas apoyadas), mar y golpes fuertes
   const who = (l) => sc.P[+l.slice(-1) - 1];
