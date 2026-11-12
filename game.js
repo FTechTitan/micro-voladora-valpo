@@ -11,6 +11,7 @@ const DRAW = 110; // franjas visibles
 const HOR = 250; // altura del horizonte en pantalla
 const MAXV = SEG * 60;
 const GRAV = 15000;
+const BACK = 2400; // distancia de la cámara detrás de la micro
 
 // DO NOT replace existing keys — they match the physical arcade cabinet wiring.
 // To add local testing shortcuts, append extra keys to any array.
@@ -144,7 +145,7 @@ function create() {
   sc.hud.ignore(sc.g);
   sc.ho = (o) => (sc.cameras.main.ignore(o), o);
   makeTextures(sc);
-  sc.p = { z: 0, x: 0, v: 0, y: 0, vy: 0, air: false, airT: 0, roll: 0, rv: 0, steer: 0, pax: 25 };
+  sc.p = { z: 3000, x: 0, v: 0, y: 0, vy: 0, air: false, airT: 0, roll: 0, rv: 0, steer: 0, pax: 25 };
   sc.parts = [];
   sc.at = {};
   const put = (o) => ((sc.at[o.i] = sc.at[o.i] || []).push(o), o);
@@ -167,11 +168,16 @@ function create() {
   sc.doorK = 0;
   sc.t0 = 0;
   sc.doorT = 0;
-  const hint = sc.ho(sc.add.text(W / 2, 110, 'JOYSTICK: ▲ ACELERA  ▼ FRENA  ◄ ► GIRA\nB1 BOCINA   B2 ABRE/CIERRA PUERTA (frena en el paradero)\n¡ARRANCA DE LOS PACOS Y JUNTA LUCAS!', { fontFamily: 'monospace', fontSize: '15px', fontStyle: 'bold', color: '#f2efe6', stroke: '#1b2733', strokeThickness: 5, align: 'center' }).setOrigin(0.5));
+  sc.req = null;
+  sc.reqT = 0;
+  const hint = sc.ho(sc.add.text(W / 2, 110, 'JOYSTICK: ▲ ACELERA  ▼ FRENA  ◄ ► GIRA\nB1 BOCINA  B2 PUERTA  B3 VISTA\n¡ARRANCA DE LOS PACOS Y JUNTA LUCAS!', { fontFamily: 'monospace', fontSize: '15px', fontStyle: 'bold', color: '#f2efe6', stroke: '#1b2733', strokeThickness: 5, align: 'center' }).setOrigin(0.5));
   sc.tweens.add({ targets: hint, alpha: 0, delay: 7000, duration: 800 });
   sc.pitch = 0;
   sc.bgX = 0;
+  sc.camY = CAMH;
+  sc.bus = makeBus(sc);
   createDash(sc);
+  setView(sc, true);
 }
 
 function update(time, delta) {
@@ -185,7 +191,8 @@ function update(time, delta) {
     updateStuff(sc, time, dt);
   }
   sc.doorK += ((sc.p.door ? 1 : 0) - sc.doorK) * Math.min(1, dt * 9);
-  sc.cameras.main.setRotation(sc.p.roll);
+  if (pr.P1_3) setView(sc, !sc.chase);
+  sc.cameras.main.setRotation(sc.p.roll * (sc.chase ? 0.25 : 1));
   render(sc);
   updateParts(sc, dt);
   refreshDash(sc, dt);
@@ -282,6 +289,33 @@ function updateStuff(sc, t, dt) {
     sfx(sc, sc.sirH ? 'sirA' : 'sirB');
   }
   if (sc.paco.d <= 0) gameOver(sc, t);
+  // timbre: alguien pide bajarse más adelante
+  if (!sc.reqT) sc.reqT = t + 8000;
+  if (!sc.req && t > sc.reqT && p.pax > 0) {
+    let i = (pi + 45) % N;
+    while (S[i].sea || S[(i + 1) % N].sea || S[(i + N - 1) % N].sea) i = (i + 5) % N;
+    sc.req = { i, n: Math.min(p.pax, 1 + Math.floor(Math.random() * 3)) };
+    sfx(sc, 'bell');
+    say(sc, '¡RIIING! SE BAJAN ' + sc.req.n, '#ffd23f');
+  }
+  if (sc.req) {
+    const a = ahead(sc.req.i);
+    if ((a < 6 || a > N - 4) && p.door && sp < 0.15 && !p.air && t > sc.doorT) {
+      sc.req.n--;
+      p.pax--;
+      sc.cash += 500;
+      sc.doorT = t + 320;
+      sfx(sc, 'pick');
+      say(sc, '¡GRACIAS, TÍO! +$500', '#9bc53d');
+    } else if (a > N - 30 && a <= N - 4) {
+      losePax(sc, sc.req.n, '¡ME PASÓ, CHOFER! SE TIRARON');
+      sc.req.n = 0;
+    }
+    if (sc.req.n <= 0) {
+      sc.req = null;
+      sc.reqT = t + 9000 + Math.random() * 8000;
+    }
+  }
   // curao meando: la poza llega a la calle
   for (const c of sc.curaos) {
     const a = ahead(c.i);
@@ -291,7 +325,13 @@ function updateStuff(sc, t, dt) {
       losePax(sc, 1, p.x < -1 ? '¡CASI LO ATROPELLAS!' : '¡PASASTE POR LA POZA!');
     }
   }
-  sc.tStop.setText(sc.stops.some((o) => ahead(o.i) < 45 && o.n > 0) ? 'PARADERO ▶ frena y abre la puerta' : '');
+  sc.tStop.setText(
+    sc.req
+      ? '¡TIMBRE! BAJAN ' + sc.req.n + ' en ' + Math.max(0, Math.round((ahead(sc.req.i) % (N - 4)) * SEG / 100)) + ' m: frena y abre (B2)'
+      : sc.stops.some((o) => ahead(o.i) < 45 && o.n > 0)
+        ? 'PARADERO ▶ frena y abre la puerta (B2)'
+        : ''
+  );
 }
 
 function updatePlayer(sc, dt) {
@@ -377,10 +417,80 @@ function gameOver(sc, t) {
   sfx(sc, 'crash');
   const st = (sz, c) => ({ fontFamily: 'monospace', fontSize: sz, fontStyle: 'bold', color: c, stroke: '#1b2733', strokeThickness: 7, align: 'center' });
   sc.ho(sc.add.rectangle(W / 2, H / 2, W, H, 0x10141a, 0.78).setDepth(8));
-  sc.ho(sc.add.text(W / 2, 170, '¡TE PILLARON\nLOS PACOS!', st('54px', '#ff5e5b')).setOrigin(0.5).setDepth(9));
-  sc.ho(sc.add.text(W / 2, 320, 'Recaudaste $ ' + sc.cash.toLocaleString('es-CL') + '\nLlevabas ' + sc.p.pax + ' pasajeros', st('26px', '#ffd23f')).setOrigin(0.5).setDepth(9));
-  const pr = sc.ho(sc.add.text(W / 2, 450, 'START o B1 para otra vuelta', st('22px', '#9bc53d')).setOrigin(0.5).setDepth(9));
+  drawPaco(sc.ho(sc.add.graphics().setDepth(9)), t);
+  sc.ho(sc.add.text(205, 92, '¿Así que andaba\nvolando, caballero?', { ...st('17px', '#1b2733'), strokeThickness: 0 }).setOrigin(0.5).setDepth(10));
+  sc.ho(sc.add.text(560, 170, '¡TE PILLARON\nLOS PACOS!', st('46px', '#ff5e5b')).setOrigin(0.5).setDepth(9));
+  sc.ho(sc.add.text(560, 310, 'Recaudaste\n$ ' + sc.cash.toLocaleString('es-CL') + '\nLlevabas ' + sc.p.pax + ' pasajeros', st('24px', '#ffd23f')).setOrigin(0.5).setDepth(9));
+  const pr = sc.ho(sc.add.text(560, 440, 'START o B1\npara otra vuelta', st('20px', '#9bc53d')).setOrigin(0.5).setDepth(9));
   sc.tweens.add({ targets: pr, alpha: 0.2, duration: 500, yoyo: true, repeat: -1 });
+}
+
+// Carabinero asomado a la ventana del chofer: uniforme verde, gorra con visera e insignia,
+// bigote, guante blanco y la libreta de partes.
+function drawPaco(g) {
+  const V = 0x2e5e3a;
+  const P = 0xd9a77c;
+  // globo de diálogo
+  g.fillStyle(0xf2efe6).fillRoundedRect(85, 55, 240, 74, 14).fillTriangle(180, 128, 215, 128, 205, 160);
+  // radiopatrulla atrás con baliza
+  g.fillStyle(0xf2efe6).fillRect(300, 420, 230, 120);
+  g.fillStyle(0x1f7a3c).fillRect(300, 480, 230, 26);
+  g.fillStyle(0xff2d2d).fillRect(340, 400, 60, 20);
+  g.fillStyle(0x2d6bff).fillRect(420, 400, 60, 20);
+  // cuerpo
+  g.fillStyle(V).fillRoundedRect(70, 400, 270, 230, 40);
+  g.fillStyle(0x9cb38a).fillTriangle(170, 400, 240, 400, 205, 470);
+  g.fillStyle(0x1f3d27).fillRect(197, 420, 16, 90);
+  g.fillStyle(0xd4af37).fillCircle(120, 450, 13).fillRect(270, 440, 40, 10);
+  g.lineStyle(6, 0x1f3d27).lineBetween(70, 420, 140, 405).lineBetween(340, 420, 270, 405);
+  // cuello y cabeza
+  g.fillStyle(P).fillRect(180, 350, 50, 60);
+  g.fillEllipse(205, 300, 130, 150);
+  g.fillCircle(140, 305, 16).fillCircle(270, 305, 16);
+  // cara seria
+  g.fillStyle(0x1b1b1b).fillCircle(180, 298, 7).fillCircle(230, 298, 7);
+  g.lineStyle(5, 0x3b2a1a).lineBetween(163, 280, 195, 287).lineBetween(247, 280, 215, 287);
+  g.fillStyle(0x3b2a1a).fillEllipse(205, 340, 70, 18);
+  g.lineStyle(3, 0x7a4b3a).lineBetween(190, 358, 220, 358);
+  // gorra verde con visera negra e insignia dorada
+  g.fillStyle(V).fillEllipse(205, 225, 170, 60);
+  g.fillRect(140, 225, 130, 34);
+  g.fillStyle(0x0f0f0f).fillEllipse(205, 262, 150, 22);
+  g.fillStyle(0xd4af37).fillCircle(205, 238, 14);
+  g.fillStyle(V).fillCircle(205, 238, 6);
+  // brazo con guante blanco y libreta de partes
+  g.fillStyle(V).fillRoundedRect(300, 470, 60, 120, 20);
+  g.fillStyle(0xffffff).fillCircle(335, 470, 30);
+  g.fillStyle(0xf8f4e3).fillRect(300, 395, 70, 90);
+  g.lineStyle(2, 0x9aa3ad);
+  for (let k = 0; k < 5; k++) g.lineBetween(308, 412 + k * 14, 362, 412 + k * 14);
+}
+
+function setView(sc, chase) {
+  sc.chase = chase;
+  sc.cock.forEach((o) => o.setVisible(!chase));
+  sc.tDoor.setPosition(chase ? W / 2 : W - 170, chase ? 440 : 445);
+}
+
+// Micro de Valpo vista desde atrás (blanca con franjas), dibujada una vez; se escala y gira
+function makeBus(sc) {
+  const b = sc.add.graphics().setDepth(2);
+  sc.hud.ignore(b);
+  b.fillStyle(0xf2efe6).fillRoundedRect(-150, -285, 300, 270, 18);
+  b.fillStyle(0x1f2b36).fillRoundedRect(-125, -262, 250, 92, 8);
+  b.fillStyle(0xffffff, 0.18).fillTriangle(-110, -255, -40, -255, -110, -185);
+  b.fillStyle(0x111111).fillRect(-62, -282, 124, 18);
+  b.fillStyle(0xffb000).fillRect(-50, -278, 100, 9);
+  b.fillStyle(0xc8553d).fillRect(-150, -150, 300, 22);
+  b.fillStyle(0x2f7f9e).fillRect(-150, -122, 300, 12);
+  b.fillStyle(0xe8c547).fillRect(-150, -104, 300, 8);
+  b.fillStyle(0xd62828).fillRoundedRect(-142, -88, 26, 44, 5).fillRoundedRect(116, -88, 26, 44, 5);
+  b.fillStyle(0xf29e4c).fillRect(-142, -40, 26, 10).fillRect(116, -40, 26, 10);
+  b.fillStyle(0xffffff).fillRect(-32, -66, 64, 22);
+  b.fillStyle(0x1b2733).fillRect(-26, -61, 52, 12);
+  b.fillStyle(0x2b2b2b).fillRect(-156, -28, 312, 22);
+  b.fillStyle(0x111111).fillRoundedRect(-140, -12, 62, 26, 8).fillRoundedRect(78, -12, 62, 26, 8);
+  return b;
 }
 
 function toSea(sc, p) {
@@ -434,7 +544,8 @@ function losePax(sc, n, msg) {
   for (let j = 0; j < k; j++) {
     // unos saltan por las ventanas hacia la calle (se achican al alejarse) y otros vuelan por la cabina
     const far = j % 2;
-    const s = sc.ho(sc.add.image(120 + Math.random() * 560, 480, 'pax' + (j % 3)).setScale(far ? 4 : 3.5).setDepth(5));
+    const [ox, oy] = sc.chase && sc.bxy ? sc.bxy : [W / 2, 480];
+    const s = sc.ho(sc.add.image(ox + (Math.random() - 0.5) * (sc.chase ? 200 : 560), oy, 'pax' + (j % 3)).setScale(far ? 4 : 3.5).setDepth(5));
     sc.parts.push({ s, vx: (Math.random() - 0.5) * (far ? 500 : 900), vy: -(far ? 700 : 900) - Math.random() * 600, vr: (Math.random() - 0.5) * 14, life: 2.4, ds: far ? 1.6 : 0 });
   }
 }
@@ -491,10 +602,14 @@ function render(sc) {
   const g = sc.g;
   const p = sc.p;
   g.clear();
-  const cy = HOR + sc.pitch;
-  const base = Math.floor(p.z / SEG);
-  const pct = (p.z % SEG) / SEG;
-  const camY = p.y + CAMH;
+  const ch = sc.chase;
+  const cz = p.z - (ch ? BACK : 0);
+  const cy = HOR + sc.pitch * (ch ? 0.4 : 1);
+  const base = Math.floor(cz / SEG);
+  const pct = (cz % SEG) / SEG;
+  sc.camY += (Math.max(p.y, groundY(cz)) + 1800 - sc.camY) * (ch ? 0.12 : 1);
+  const camY = ch ? sc.camY : p.y + CAMH;
+  let bx = W / 2;
   sc.bgX += S[base % N].c * p.v * 0.00004;
 
   drawBay(g, cy, sc.bgX);
@@ -505,11 +620,12 @@ function render(sc) {
   let dx = -S[base % N].c * pct;
   for (let n = 0; n <= DRAW; n++) {
     const i = (base + n) % N;
-    const z1 = (base + n) * SEG - p.z;
+    const z1 = (base + n) * SEG - cz;
     const cx = p.x * RW;
     const a = proj(x - cx, S[i].y - camY, z1, cy);
     const b = proj(x + dx - cx, S[(i + 1) % N].y - camY, z1 + SEG, cy);
     L.push({ i, a, b, n });
+    if (z1 <= BACK && z1 + SEG > BACK) bx = a.x + (b.x - a.x) * ((BACK - z1) / SEG) + a.s * p.x * RW;
     x += dx;
     dx += S[i].c;
   }
@@ -520,7 +636,7 @@ function render(sc) {
     const alt = i & 1;
     if (S[i].sea) {
       // olas abajo, en el corte
-      const wy = proj(0, S[i].y - 6000 - p.y - CAMH, (base + L[k].n) * SEG - p.z, cy).y;
+      const wy = proj(0, S[i].y - 6000 - p.y - CAMH, (base + L[k].n) * SEG - cz, cy).y;
       if (wy < H + 300) g.fillStyle(0x2d6f9e).fillRect(-300, wy, W + 600, H + 300 - wy).fillStyle(0xdde5ea, 0.6).fillRect(-300, wy, W + 600, Math.max(1, a.s * 60));
       continue;
     }
@@ -539,6 +655,14 @@ function render(sc) {
     }
     scLap = sc.lap + (base + L[k].n >= (sc.lap + 1) * N ? 1 : 0);
     for (const o of sc.at[i] || []) drawObj(g, a, o, sc.time.now);
+    if (sc.req && i === sc.req.i) {
+      const x = a.x + a.s * 1.12 * RW;
+      const fl = Math.floor(sc.time.now / 250) % 2;
+      g.fillStyle(0x3d4247).fillRect(x, a.y - a.s * 2600, a.s * 60, a.s * 2600);
+      g.fillStyle(fl ? 0xffd23f : 0xf29e4c).fillRect(x - a.s * 300, a.y - a.s * 3000, a.s * 660, a.s * 480);
+      g.fillStyle(0x1b2733).fillTriangle(x - a.s * 150, a.y - a.s * 2860, x + a.s * 210, a.y - a.s * 2860, x + a.s * 30, a.y - a.s * 2600);
+      person(g, a, 1.2 * RW + 200, 0xc8553d);
+    }
     // postes con cables, cada 5 franjas
     if (i % 5 === 0) {
       const tr = post(g, a, 1.17 * RW);
@@ -553,6 +677,16 @@ function render(sc) {
       pr = tr;
       pl = tl;
     }
+  }
+  // la micro vista desde atrás, con su sombra en el suelo
+  const bus = sc.bus.setVisible(ch);
+  if (ch) {
+    const q = proj(0, p.y - camY, BACK, cy);
+    const sh = proj(0, groundY(p.z) - camY, BACK, cy);
+    const k = (q.s * 1700) / 300;
+    g.fillStyle(0x000000, 0.3).fillEllipse(bx, sh.y, q.s * 2000, q.s * 260);
+    bus.setPosition(bx, q.y).setScale(k).setRotation(p.roll * 0.75);
+    sc.bxy = [bx, q.y - 140 * k];
   }
 }
 
@@ -663,10 +797,11 @@ function drawBay(g, cy, bx) {
 // ---------- Tablero ----------
 function createDash(sc) {
   const d = sc.ho(sc.add.graphics());
+  const tb = sc.ho(sc.add.graphics());
   // marco del parabrisas
   d.fillStyle(0x1f2226);
   d.fillRect(0, 0, W, 22);
-  sc.ho(sc.add.text(W / 2, 11, '612  PLAYA ANCHA - CERRO ALEGRE', { fontFamily: 'monospace', fontSize: '12px', fontStyle: 'bold', color: '#ffb000' }).setOrigin(0.5));
+  sc.route = sc.ho(sc.add.text(W / 2, 11, '612  PLAYA ANCHA - CERRO ALEGRE', { fontFamily: 'monospace', fontSize: '12px', fontStyle: 'bold', color: '#ffb000' }).setOrigin(0.5));
   d.fillPoints([{ x: 0, y: 0 }, { x: 46, y: 0 }, { x: 96, y: 470 }, { x: 0, y: 480 }], true);
   d.fillPoints([{ x: W, y: 0 }, { x: W - 46, y: 0 }, { x: W - 96, y: 470 }, { x: W, y: 480 }], true);
   // tablero
@@ -689,14 +824,17 @@ function createDash(sc) {
   sc.wheel = wh;
   // barra de datos arriba
   const st = (sz, col) => ({ fontFamily: 'monospace', fontSize: sz, fontStyle: 'bold', color: col });
-  d.fillStyle(0x1b2733, 0.92).fillRoundedRect(110, 30, 175, 44, 10).fillRoundedRect(W - 285, 30, 175, 44, 10);
+  tb.fillStyle(0x1b2733, 0.92).fillRoundedRect(110, 30, 175, 44, 10).fillRoundedRect(W - 285, 30, 175, 44, 10);
   sc.mir = sc.ho(sc.add.graphics());
   sc.doorG = sc.ho(sc.add.graphics());
   sc.tSpeed = sc.ho(sc.add.text(590, 560, '0', st('18px', '#f2efe6')).setOrigin(0.5));
-  sc.ho(sc.add.text(590, 578, 'km/h', st('11px', '#9aa3ad')).setOrigin(0.5));
+  sc.kmh = sc.ho(sc.add.text(590, 578, 'km/h', st('11px', '#9aa3ad')).setOrigin(0.5));
+  sc.tFast = sc.ho(sc.add.text(W - 20, H - 16, '', st('24px', '#f2efe6')).setOrigin(1, 1));
+  sc.ho(sc.add.text(20, H - 14, 'B3: CAMBIAR VISTA', st('12px', '#9aa3ad')).setOrigin(0, 1));
   sc.water = sc.ho(sc.add.rectangle(W / 2, H / 2, W, H, 0x1f5f8b, 1).setAlpha(0).setDepth(4));
   sc.door = sc.ho(sc.add.graphics());
-  sc.ho(sc.add.text(470, 560, 'PUERTA', st('11px', '#9aa3ad')).setOrigin(0.5));
+  sc.lblDoor = sc.ho(sc.add.text(470, 560, 'B2 PUERTA', st('11px', '#9aa3ad')).setOrigin(0.5));
+  sc.cock = [d, sc.route, sc.needle, sc.wheel, sc.tSpeed, sc.kmh, sc.lblDoor, sc.door, sc.doorG];
   sc.tStop = sc.ho(sc.add.text(W / 2, 92, '', st('16px', '#e8c547')).setOrigin(0.5));
   sc.tTop = sc.ho(sc.add.text(197, 52, '', st('18px', '#f2efe6')).setOrigin(0.5));
   sc.tCash = sc.ho(sc.add.text(W - 197, 52, '', st('20px', '#ffd23f')).setOrigin(0.5));
@@ -712,6 +850,7 @@ function refreshDash(sc) {
   const an = Math.PI * (0.8 + sp * 1.4);
   sc.needle.clear().lineStyle(4, 0xe25c3b).lineBetween(0, 0, Math.cos(an) * 44, Math.sin(an) * 44);
   sc.tSpeed.setText(Math.round(sp * 90));
+  sc.tFast.setText(sc.chase ? Math.round(sp * 90) + ' km/h' : '');
   sc.tTop.setText('PASAJEROS ' + p.pax);
   sc.tCash.setText('$ ' + sc.cash.toLocaleString('es-CL'));
   const d = sc.paco.d;
@@ -797,6 +936,7 @@ function sfx(sc, type) {
     else if (type === 'crash') tone(220, 40, 0.35, 'sawtooth', 0.2);
     else if (type === 'yelp') tone(1400, 600, 0.15, 'triangle', 0.18);
     else if (type === 'splash') tone(900, 120, 0.25, 'sawtooth', 0.1);
+    else if (type === 'bell') (tone(1568, 1560, 0.3, 'sine', 0.18), tone(1319, 1310, 0.4, 'sine', 0.18, 0.32));
     else if (type === 'coin') (tone(988, 988, 0.06, 'square', 0.07), tone(1319, 1319, 0.12, 'square', 0.07, 0.06));
     else if (type === 'sirA') tone(720, 960, 0.42, 'triangle', 0.07);
     else if (type === 'sirB') tone(960, 720, 0.42, 'triangle', 0.07);
